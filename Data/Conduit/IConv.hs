@@ -6,15 +6,16 @@ module Data.Conduit.IConv
     (
       CharacterEncoding
     , convert
+    , convertFail
     ) where
 
 import Data.Conduit
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as BU
 
-import Control.Applicative ((<$>))
+-- import Control.Applicative ((<$>))
 
-import Foreign hiding (unsafePerformIO)
+import Foreign -- hiding (unsafePerformIO)
 import Foreign.C
 import System.IO.Unsafe (unsafePerformIO)
 import Control.Exception (mask_)
@@ -33,11 +34,33 @@ type CharacterEncoding = String
 --
 -- Without this encoding errors will cause an exception.
 --
--- On errors this will call `fail`
+-- On errors this will call `Control.Monad.Fail.fail`
+convertFail :: MonadFail m => CharacterEncoding -- ^ Name of input character encoding
+                           -> CharacterEncoding -- ^ Name of output character encoding
+                           -> ConduitT B.ByteString B.ByteString m ()
+convertFail inputEncoding outputEncoding = convertCatch inputEncoding outputEncoding fail
+
+-- | Convert text from one named character encoding to another.
+--
+-- Encoding names can be e.g. @\"UTF-8\"@ or @\"ISO-8559-1\"@. Appending
+-- @\"\/\/IGNORE\"@ to the output encoding will cause encoding errors to be
+-- ignored and the characters to be dropped, @\"\/\/IGNORE,TRANSLIT\"@ will
+-- cause them to be replaced by a replacement character.
+--
+-- Without this encoding errors will cause an exception.
+--
+-- On errors this will call `error`
 convert :: Monad m => CharacterEncoding -- ^ Name of input character encoding
                    -> CharacterEncoding -- ^ Name of output character encoding
-                   -> Conduit B.ByteString m B.ByteString
-convert inputEncoding outputEncoding = run initialConvert
+                   -> ConduitT B.ByteString B.ByteString m ()
+convert inputEncoding outputEncoding = convertCatch inputEncoding outputEncoding error
+
+
+convertCatch :: Monad m => CharacterEncoding -- ^ Name of input character encoding
+                        -> CharacterEncoding -- ^ Name of output character encoding
+                        -> (String -> ConduitT B.ByteString B.ByteString m ())
+                        -> ConduitT B.ByteString B.ByteString m ()
+convertCatch inputEncoding outputEncoding errorFunc = run initialConvert
   where
     initialConvert = iconvConvert inputEncoding outputEncoding
 
@@ -49,10 +72,10 @@ convert inputEncoding outputEncoding = run initialConvert
                             let res = f input
                             case res of
                                 ConvertSuccess c f'                -> yield c >> run f'
-                                ConvertUnsupportedConversionError  -> fail "Unsupported conversion"
-                                ConvertUnexpectedOpenError s       -> fail ("Unexpected open error: " ++ s)
-                                ConvertInvalidInputError           -> fail "Invalid input"
-                                ConvertUnexpectedConversionError s -> fail ("Unexpected conversion error: " ++ s)
+                                ConvertUnsupportedConversionError  -> errorFunc "Unsupported conversion"
+                                ConvertUnexpectedOpenError s       -> errorFunc ("Unexpected open error: " ++ s)
+                                ConvertInvalidInputError           -> errorFunc "Invalid input"
+                                ConvertUnexpectedConversionError s -> errorFunc ("Unexpected conversion error: " ++ s)
 
 -- Stream based API around iconv()
 data ConvertResult =
@@ -147,7 +170,7 @@ iconvConvert inputEncoding outputEncoding input =
 
 
 -- Thin wrapper around iconv_open()
-data IConvT = IConvT (ForeignPtr IConvT)
+newtype IConvT = IConvT (ForeignPtr IConvT)
 data IConvOpenError =
     UnsupportedConversion
   | UnexpectedOpenError Errno
